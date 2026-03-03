@@ -1,0 +1,174 @@
+cmake_minimum_required(VERSION 3.11)
+
+project(ErwanTools)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# ============================================================================
+# Windows SPECIFIC CONFIGURATION
+# ============================================================================
+if(NOT WIN32)
+    message(FATAL_ERROR "This CMakeLists.txt is for Windows only")
+endif()
+
+# ============================================================================
+# MSVC Configuration
+# ============================================================================
+if(MSVC)
+    add_definitions(/D_CRT_SECURE_NO_WARNINGS /D_SCL_SECURE_NO_WARNINGS /DNOMINMAX)
+    add_definitions(-D_USE_MATH_DEFINES)
+endif()
+
+# ============================================================================
+# Nuke Configuration
+# ============================================================================
+if(NOT DEFINED NUKE_VERSION)
+    set(NUKE_VERSION "17.0v1")
+endif()
+set(NUKE_INSTALL_DIR "C:/Program Files/Nuke${NUKE_VERSION}")
+
+message(STATUS "Nuke Version: ${NUKE_VERSION}")
+message(STATUS "Nuke Directory: ${NUKE_INSTALL_DIR}")
+
+# Verify Nuke directory exists
+if(NOT EXISTS "${NUKE_INSTALL_DIR}")
+    message(FATAL_ERROR "Nuke directory not found: ${NUKE_INSTALL_DIR}")
+endif()
+if(NOT EXISTS "${NUKE_INSTALL_DIR}/DDImage.lib")
+    message(FATAL_ERROR "DDImage.lib not found in: ${NUKE_INSTALL_DIR}")
+endif()
+
+# Add the Nuke include directory
+include_directories("${NUKE_INSTALL_DIR}/include")
+
+# ============================================================================
+# OpenGL Configuration
+# ============================================================================
+set(GL_LIBRARIES OpenGL32)
+message(STATUS "OpenGL: OpenGL32")
+
+# ============================================================================
+# Python Configuration (Nuke's bundled Python)
+# ============================================================================
+find_path(NUKE_PYTHON_INCLUDE "Python.h"
+    PATHS
+        "${NUKE_INSTALL_DIR}/include/include"
+        "${NUKE_INSTALL_DIR}/include/python3.11"
+        "${NUKE_INSTALL_DIR}/include/python3.10"
+        "${NUKE_INSTALL_DIR}/include/python3.9"
+        "${NUKE_INSTALL_DIR}/include"
+    NO_DEFAULT_PATH
+)
+
+if(NUKE_PYTHON_INCLUDE)
+    message(STATUS "Python Include: ${NUKE_PYTHON_INCLUDE}")
+    include_directories("${NUKE_PYTHON_INCLUDE}")
+else()
+    message(FATAL_ERROR "Could not find Nuke's Python.h")
+endif()
+
+# Find Python library (version-agnostic)
+# Nuke 17 ships python311.dll but no import .lib on Windows.
+# Search system Python installations for a matching import library.
+# Nuke 17 = Python 3.11, Nuke 16 = Python 3.10, Nuke 15 = Python 3.9
+file(GLOB NUKE_PYTHON_LIB
+    "${NUKE_INSTALL_DIR}/python3*.lib"
+    "${NUKE_INSTALL_DIR}/libs/python3*.lib"
+    "${NUKE_INSTALL_DIR}/lib/python3*.lib"
+)
+if(NOT NUKE_PYTHON_LIB)
+    # Search system Python installations - try each version explicitly in priority order
+    # so we always match the Nuke Python version first
+    set(_PY_SEARCH_VERSIONS 311 310 39)
+    set(_PY_SEARCH_DIRS
+        "$ENV{LOCALAPPDATA}/Programs/Python"
+        "C:/Program Files"
+        "C:"
+    )
+    foreach(_PY_VER ${_PY_SEARCH_VERSIONS})
+        foreach(_PY_DIR ${_PY_SEARCH_DIRS})
+            set(_PY_CANDIDATE "${_PY_DIR}/Python${_PY_VER}/libs/python${_PY_VER}.lib")
+            if(EXISTS "${_PY_CANDIDATE}")
+                set(NUKE_PYTHON_LIB "${_PY_CANDIDATE}")
+                break()
+            endif()
+        endforeach()
+        if(NUKE_PYTHON_LIB)
+            break()
+        endif()
+    endforeach()
+endif()
+if(NUKE_PYTHON_LIB)
+    list(GET NUKE_PYTHON_LIB 0 NUKE_PYTHON_LIB)
+    message(STATUS "Python Library: ${NUKE_PYTHON_LIB}")
+else()
+    set(NUKE_PYTHON_LIB "")
+    message(WARNING "Python Library: Not found — plugins using Python C API will fail to link")
+endif()
+
+# Set the prefix for shared libraries
+set(CMAKE_SHARED_LIBRARY_PREFIX "")
+
+# ============================================================================
+# Plugin Source Files
+# ============================================================================
+set(SOURCE_FILES 
+    src/PointGradient.cpp
+)
+
+# ============================================================================
+# Create Plugins
+# ============================================================================
+foreach(SRC_FILE ${SOURCE_FILES})
+    get_filename_component(LIB_NAME ${SRC_FILE} NAME_WE)
+
+    add_library(${LIB_NAME} SHARED ${SRC_FILE})
+
+    # Set plugin properties
+    set_target_properties(${LIB_NAME} PROPERTIES
+        SUFFIX ".dll"
+    )
+
+    # Link the necessary libraries
+    target_link_libraries(${LIB_NAME} PRIVATE
+        "${NUKE_INSTALL_DIR}/DDImage.lib"
+        ${GL_LIBRARIES}
+    )
+    if(NUKE_PYTHON_LIB)
+        target_link_libraries(${LIB_NAME} PRIVATE "${NUKE_PYTHON_LIB}")
+    endif()
+
+    # Install each plugin
+    install(TARGETS ${LIB_NAME} DESTINATION ${CMAKE_INSTALL_PREFIX})
+endforeach()
+
+# ============================================================================
+# Build Summary
+# ============================================================================
+message(STATUS "")
+message(STATUS "========================================")
+message(STATUS "Windows Build Configuration Summary:")
+message(STATUS "  Nuke Version:   ${NUKE_VERSION}")
+message(STATUS "  Nuke Directory: ${NUKE_INSTALL_DIR}")
+message(STATUS "  Python Include: ${NUKE_PYTHON_INCLUDE}")
+if(NUKE_PYTHON_LIB)
+    message(STATUS "  Python Library: ${NUKE_PYTHON_LIB}")
+else()
+    message(STATUS "  Python Library: Implicit (via DDImage)")
+endif()
+message(STATUS "  OpenGL:         OpenGL32")
+message(STATUS "  Install Prefix: ${CMAKE_INSTALL_PREFIX}")
+message(STATUS "  ")
+message(STATUS "Plugins:")
+foreach(SRC_FILE ${SOURCE_FILES})
+    get_filename_component(LIB_NAME ${SRC_FILE} NAME_WE)
+    message(STATUS "  ${LIB_NAME}.dll")
+endforeach()
+message(STATUS "  ")
+message(STATUS "Build Commands:")
+message(STATUS "  Configure:  cmake -B build -G \"Visual Studio 17 2022\"")
+message(STATUS "  Build:      cmake --build build --config Release")
+message(STATUS "  Install:    cmake --install build --config Release")
+message(STATUS "========================================")
+message(STATUS "")
