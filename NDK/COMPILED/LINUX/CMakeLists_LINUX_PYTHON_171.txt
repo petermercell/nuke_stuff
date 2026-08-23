@@ -1,0 +1,196 @@
+cmake_minimum_required(VERSION 3.11)
+
+project(ErwanTools)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# ============================================================================
+# Linux SPECIFIC CONFIGURATION
+# ============================================================================
+if(NOT UNIX OR APPLE)
+    message(FATAL_ERROR "This CMakeLists.txt is for Linux only")
+endif()
+
+# ============================================================================
+# RPATH Configuration - Make plugins portable
+# ============================================================================
+# Don't set RPATH - rely on Nuke's LD_LIBRARY_PATH environment
+# This makes the plugins work regardless of where Nuke is installed
+set(CMAKE_SKIP_BUILD_RPATH TRUE)
+set(CMAKE_SKIP_INSTALL_RPATH TRUE)
+
+# ============================================================================
+# Nuke Configuration
+# ============================================================================
+# NDK plugins are NOT binary compatible across Nuke releases. A .so built
+# against one release will fail to load in another, e.g.
+#   undefined symbol: _ZNK2DD5Image2Op12nodeFullPathEc
+# Build once per Nuke major.minor and install into ~/.nuke/CPP/<major.minor>/:
+#
+#   cmake -B build-17.1 -DNUKE_VERSION=17.1v1 \
+#         -DCMAKE_INSTALL_PREFIX=$HOME/.nuke/CPP/17.1
+if(NOT DEFINED NUKE_VERSION)
+    set(NUKE_VERSION "17.1v1")
+endif()
+
+if(NOT DEFINED NDKDIR)
+    set(NDKDIR /opt/Nuke${NUKE_VERSION})
+endif()
+
+# Short "17.1" form, used for the suggested install path.
+string(REGEX MATCH "^[0-9]+\\.[0-9]+" NUKE_SHORT_VERSION "${NUKE_VERSION}")
+
+message(STATUS "Nuke Version: ${NUKE_VERSION}")
+message(STATUS "Nuke Directory: ${NDKDIR}")
+
+# Verify Nuke directory exists
+if(NOT EXISTS ${NDKDIR})
+    message(FATAL_ERROR "Nuke directory not found: ${NDKDIR}\n"
+                        "Pass -DNUKE_VERSION=<version> or -DNDKDIR=<path>.")
+endif()
+if(NOT EXISTS ${NDKDIR}/libDDImage.so)
+    message(FATAL_ERROR "libDDImage.so not found in: ${NDKDIR}")
+endif()
+
+# Add the Nuke include directory
+include_directories(${NDKDIR}/include)
+
+# ============================================================================
+# Python Configuration (Nuke's bundled Python)
+# ============================================================================
+# The bundled Python version changes between Nuke releases (3.7 / 3.9 / 3.10 /
+# 3.11 / 3.13 ...), so discover it rather than hard-coding it. Headers and the
+# library MUST come from Nuke's own bundle - linking a system libpython into a
+# Nuke plugin puts two interpreters in one process and crashes at random.
+file(GLOB NUKE_PYTHON_INCLUDE_CANDIDATES
+    "${NDKDIR}/include/python3*"
+    "${NDKDIR}/lib/python3*/include/python3*"
+)
+
+find_path(NUKE_PYTHON_INCLUDE "Python.h"
+    PATHS
+        ${NUKE_PYTHON_INCLUDE_CANDIDATES}
+        "${NDKDIR}/include"
+    NO_DEFAULT_PATH
+)
+
+file(GLOB NUKE_PYTHON_LIB_CANDIDATES
+    "${NDKDIR}/libpython3*.so*"
+    "${NDKDIR}/lib/libpython3*.so*"
+)
+
+# Prefer an exact find_library hit; fall back to whatever the glob turned up.
+find_library(NUKE_PYTHON_LIB
+    NAMES python3.14 python3.13 python3.12 python3.11 python3.10 python3.9 python3
+    PATHS
+        "${NDKDIR}/lib"
+        "${NDKDIR}"
+    NO_DEFAULT_PATH
+)
+
+if(NOT NUKE_PYTHON_LIB AND NUKE_PYTHON_LIB_CANDIDATES)
+    list(GET NUKE_PYTHON_LIB_CANDIDATES 0 NUKE_PYTHON_LIB)
+endif()
+
+if(NUKE_PYTHON_INCLUDE)
+    message(STATUS "Python Include: ${NUKE_PYTHON_INCLUDE}")
+else()
+    message(FATAL_ERROR "Could not find Nuke's Python.h. Try: find ${NDKDIR} -name Python.h")
+endif()
+
+if(NUKE_PYTHON_LIB)
+    message(STATUS "Python Library: ${NUKE_PYTHON_LIB}")
+else()
+    message(FATAL_ERROR "Could not find Nuke's libpython. Try: find ${NDKDIR} -name 'libpython*'")
+endif()
+
+# ============================================================================
+# OpenGL
+# ============================================================================
+find_package(OpenGL REQUIRED)
+
+# Uncomment the following if needed for compatibility
+#set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=0")
+add_compile_options(-fPIC)
+
+# Set the prefix for shared libraries
+set(CMAKE_SHARED_LIBRARY_PREFIX "")
+
+# ============================================================================
+# Plugin Source Files
+# ============================================================================
+
+# Standard plugins (no Python dependency)
+
+# Plugins that require Python
+set(PYTHON_SOURCE_FILES
+    src/PointGradient.cpp
+)
+
+# ============================================================================
+# Create Standard Plugins
+# ============================================================================
+foreach(SRC_FILE ${SOURCE_FILES})
+    get_filename_component(LIB_NAME ${SRC_FILE} NAME_WE)
+
+    add_library(${LIB_NAME} SHARED ${SRC_FILE})
+
+    target_link_libraries(${LIB_NAME} PRIVATE
+        ${NDKDIR}/libDDImage.so
+        OpenGL::GL
+    )
+
+    install(TARGETS ${LIB_NAME} DESTINATION ${CMAKE_INSTALL_PREFIX})
+endforeach()
+
+# ============================================================================
+# Create Python-dependent Plugins
+# ============================================================================
+foreach(SRC_FILE ${PYTHON_SOURCE_FILES})
+    get_filename_component(LIB_NAME ${SRC_FILE} NAME_WE)
+
+    add_library(${LIB_NAME} SHARED ${SRC_FILE})
+
+    target_include_directories(${LIB_NAME} PRIVATE ${NUKE_PYTHON_INCLUDE})
+
+    target_link_libraries(${LIB_NAME} PRIVATE
+        ${NDKDIR}/libDDImage.so
+        OpenGL::GL
+        ${NUKE_PYTHON_LIB}
+    )
+
+    install(TARGETS ${LIB_NAME} DESTINATION ${CMAKE_INSTALL_PREFIX})
+endforeach()
+
+# ============================================================================
+# Build Summary
+# ============================================================================
+message(STATUS "")
+message(STATUS "========================================")
+message(STATUS "Linux Build Configuration Summary:")
+message(STATUS "  Nuke Version:   ${NUKE_VERSION}")
+message(STATUS "  Nuke Directory: ${NDKDIR}")
+message(STATUS "  Python Include: ${NUKE_PYTHON_INCLUDE}")
+message(STATUS "  Python Library: ${NUKE_PYTHON_LIB}")
+message(STATUS "  RPATH:          Not set (portable - uses Nuke's environment)")
+message(STATUS "  Install Prefix: ${CMAKE_INSTALL_PREFIX}")
+message(STATUS "  ")
+message(STATUS "Plugins:")
+foreach(SRC_FILE ${SOURCE_FILES})
+    get_filename_component(LIB_NAME ${SRC_FILE} NAME_WE)
+    message(STATUS "  ${LIB_NAME}.so")
+endforeach()
+message(STATUS "  ")
+message(STATUS "Python Plugins:")
+foreach(SRC_FILE ${PYTHON_SOURCE_FILES})
+    get_filename_component(LIB_NAME ${SRC_FILE} NAME_WE)
+    message(STATUS "  ${LIB_NAME}.so")
+endforeach()
+message(STATUS "  ")
+message(STATUS "Build Commands:")
+message(STATUS "  Configure:  cmake -B build -DNUKE_VERSION=${NUKE_VERSION} -DCMAKE_INSTALL_PREFIX=$ENV{HOME}/.nuke/CPP/${NUKE_SHORT_VERSION}")
+message(STATUS "  Build:      cmake --build build")
+message(STATUS "  Install:    cmake --install build")
+message(STATUS "========================================")
+message(STATUS "")
